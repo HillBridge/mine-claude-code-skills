@@ -649,3 +649,477 @@ window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'pay', order: '123'
 | **RN + WebView 混合** | 核心 RN + 边缘 H5 | **绝大多数中大型 App 的现实选择** |
 
 **一句话**：能结合且是主流最优解——RN 做核心骨架和高频/硬件页面保体验，WebView 承载易变/内容型/可复用页面换灵活和效率；代价是体验割裂、通信复杂、调试和登录态同步成本。关键是按「高频核心 vs 易变内容」清晰分层、统一 Bridge 规范、控制 H5 占比守住体验和审核底线。
+
+---
+
+## Q16：RN 的「原生组件 + JS」在热更新时能全部热更、不受商店审核吗？
+
+**关键误区澄清：热更新只能更新 JS 和资源，原生组件（原生代码）无法热更新，不是「全部都能热更」。**
+
+```
+RN App = JS 层  +  原生层
+          ↓          ↓
+       ✅ 可热更   ❌ 不可热更（必须走商店审核）
+```
+
+热更新本质是**替换 App 里的 JS bundle**，原生二进制部分动不了。
+
+| 改动内容 | 能否热更新 |
+|---|---|
+| JS 业务逻辑 / RN 组件 UI 样式 | ✅ 能 |
+| 图片/字体等 JS 引用的资源 | ✅ 能 |
+| 调用**已有**原生模块的 JS 代码 | ✅ 能（原生能力已在包里） |
+| 新增原生模块/第三方原生库 | ❌ 不能 |
+| 改原生配置（权限/Info.plist/Manifest） | ❌ 不能 |
+| 升级 Expo SDK / RN 版本 | ❌ 不能 |
+| 改 App 图标/名称/启动图 | ❌ 不能 |
+
+**为什么原生组件不能热更**：`<View>`/`<Text>` 的原生实现早已编译进 App 二进制；热更新只换 JS，调用已有原生实现没问题；但新增原生能力的代码不在用户已装的包里，热更推过去 JS 调用它会崩溃，所以必须重新 build 发版。
+
+**苹果 vs 安卓热更新政策差异**
+
+| | 苹果 App Store | 安卓 Google Play |
+|---|---|---|
+| 允许 JS 热更新 | ✅ 但有红线 | ✅ 更宽松 |
+| 红线 | 不能改变 App 主要功能/用途 | 相对宽松 |
+| 违规后果 | 可能下架 | 相对少见 |
+
+**判断口诀**：改 JS → 热更；动原生 → 发版。（对应「修 bug 多为 JS 用热更，上新功能常涉及原生走商店」）
+
+---
+
+## Q17：上生产动原生要重新打包走审核，那测试环境苹果/安卓也会审核吗，还是只有生产？
+
+**结论：真正严格的审核只在生产上架。测试环境大多数分发方式不走或只走极简审核。触发审核的是「往哪个渠道分发」，不是「是否改了原生」。**
+
+**iOS 测试分发**
+
+| 方式 | 是否审核 |
+|---|---|
+| Development / Ad-hoc（注册 UDID 设备直装，上限 100） | ❌ 不审核 |
+| Enterprise 分发 | ❌ 不审核 |
+| TestFlight 内部测试（最多 100 人） | ❌ 基本不审核 |
+| TestFlight 外部测试（最多 10000 人） | ⚠️ 首个 build 过一次轻量 Beta 审核，后续多免审 |
+| App Store 生产 | ✅ 完整严格审核 |
+
+**Android 测试分发**
+
+| 方式 | 是否审核 |
+|---|---|
+| 直接装 APK（侧载） | ❌ 不审核 |
+| Play 内部测试轨道（最多 100 人） | ⚠️ 极简/几乎即时 |
+| 封闭测试 | ⚠️ 有审核但较快 |
+| 开放测试 | ⚠️ 接近生产标准 |
+| 生产轨道 | ✅ 完整审核 |
+
+**EAS 对应做法**
+
+```jsonc
+{
+  "build": {
+    "development": { "developmentClient": true },  // 设备直装，不审核
+    "preview":     { "distribution": "internal" }, // 内部测试包，不审核
+    "production":  {}                              // 生产包，走审核
+  }
+}
+```
+
+**实务提醒**：测试包不审核，但每次改原生仍要重新 build（有耗时和 EAS 排队），测试期建议把原生改动攒批再打包，别改一行 build 一次。
+
+---
+
+## Q18：生产审核时安卓通过、iOS 没通过，会导致双端功能不一致吗？如何同步更新？
+
+**是的，不加控制就会因审核时间差出现不一致**：安卓几小时通过、用户用上新功能，iOS 被拒/审核慢、用户停在旧版，差异可能持续几小时到几天。根因是两商店审核独立、时长不一（iOS 通常更慢更严）。
+
+**解决方案（推荐→兜底）**
+
+| 方案 | 能否根治时间差 | 改代码 | 灵活度 | 场景 |
+|---|---|---|---|---|
+| **Feature Flag + 远程配置** | ✅ 彻底 | 要 | 高（灰度/回滚） | 重要功能 ⭐首选 |
+| 协调发布（手动放量） | ✅ 可以 | 否 | 中（人工盯） | 不想改代码 |
+| 后端版本兼容控制 | ✅ 部分 | 后端要 | 高 | 功能依赖接口 |
+| 接受差异+强制更新 | ❌ 不根治 | 少 | 低 | 非核心功能 |
+
+**方案一（首选）Feature Flag**：新功能代码两端都发（开关默认关、功能隐藏）→ 等 iOS/Android 都审核通过发布 → 服务端一键打开开关 → 两端用户同时看到新功能。可灰度、可一键回滚。
+
+**方案二 协调发布**：iOS 选「手动发布」（通过后不自动上线），Android 用分阶段发布/先 0% 放量，等两端都通过再一起放。不用改代码，但要人工盯，iOS 一直被拒会拖住 Android。
+
+**组合打法**：Flag 包新功能两端提交（默认关）→ 后端做版本兼容兜底 → 两端通过发布 → 服务端统一开关灰度 10%→全量 → 出问题一键关。
+
+---
+
+## Q19：Feature Flag 的机制细节（开关依据 / 拉取方式 / 新旧代码 / 清理时机 / 是否需更新 App）
+
+**① 服务端根据什么加开关配置**
+
+存一套规则，客户端拉取时带上自身信息，服务端据此判断：
+
+```jsonc
+{
+  "newPaymentFlow": {
+    "enabled": true,
+    "platform": ["ios", "android"],   // 平台：可只对某端开
+    "minVersion": "2.0.0",            // 版本：只对 >=2.0 开
+    "rolloutPercent": 10,             // 灰度比例
+    "whitelist": ["userId_123"],      // 白名单（内测）
+    "region": ["BR"],                 // 地区
+    "startTime": "2026-07-15T00:00"   // 定时开启
+  }
+}
+```
+
+灰度选「哪 10%」用 `hash(userId) % 100 < rolloutPercent`，保证同一用户结果稳定。双端时间差就靠 `platform + minVersion` 控制。
+
+**② 客户端拉配置是 HTTP 请求吗**
+
+是，普通 HTTP 请求，通常 App 启动时拉一次：
+
+```js
+const res = await fetch('https://api.myapp.com/config', {
+  headers: { 'X-Platform': Platform.OS, 'X-App-Version': appVersion, 'X-User-Id': userId },
+})
+```
+
+优化：启动拉一次存内存；请求失败用本地缓存兜底；没拉到时新开关默认「关」退回旧功能。
+```js
+const config = await loadRemoteConfig().catch(() => getCachedConfig() ?? DEFAULT_CONFIG)
+```
+
+**③ 要同时保留新旧两套代码吗**
+
+要。开关存续期内新旧代码共存，靠 `if/else` 切换，以支持随时回滚：
+```jsx
+if (flags.newPaymentFlow) return <NewPaymentFlow />
+else return <OldPaymentFlow />   // 旧代码暂留
+```
+代价是包体积略增和分支代码——这是安全发布的固有成本。
+
+**④ 什么时机清除旧代码**
+
+新功能「全量放开 + 稳定 + 老版本淘汰」后清理：灰度 10%→50%→100% → 全量观察几天~两周确认稳定不回滚 → 开关写死 true 或删判断 → 删旧代码 → 服务端清 flag。最大坏味道是 flag 用完不清、越积越多，团队要建立例行清理机制，每个 flag 建立时就规划「死期」。
+
+**⑤ 更新新版本，用户要手动更新还是打开自动同步**
+
+取决于新功能在 JS 层还是原生层（回到热更新边界）：
+
+| 情况 | 用户要做什么 | 生效方式 |
+|---|---|---|
+| 开关控制已随 App 发出的 JS 功能 | 什么都不用做 | 下次开 App 拉到新配置，自动显示 ✅ |
+| 新功能是新写的纯 JS 代码 | 走热更新 | 下次开 App 自动拉新 bundle，免去商店 ✅ |
+| 新功能涉及原生层 | 必须去商店更新 App | 下载新版本才有新功能 ❌ |
+
+「下次打开自动同步」的前提是内容在 JS 层（开关或热更新）；一旦动原生，绕不开用户手动去商店更新。
+
+**完整图景**
+
+```
+服务端配置中心(按 平台/版本/灰度/白名单 定规则)
+        │ HTTP 请求(启动拉一次，带 平台+版本+userId，失败用缓存兜底)
+        ▼
+客户端(新旧两套代码共存，if(flag) 新 : 旧)
+        ├─ 开关控制已发布的 JS 功能 → 下次开 App 自动同步，免更新 ✅
+        ├─ 新 JS 代码 → 热更新推送，下次开 App 自动生效，免去商店 ✅
+        └─ 动了原生 → 必须去商店更新 App ❌
+        ▼
+功能稳定 + 全量 + 老版本淘汰 → 清理旧代码和 flag
+```
+
+---
+
+## Q20：React Native 打包后产物和 React 打包后产物有什么异同？
+
+**核心区别**：React 打包产物是「网页静态资源」给浏览器跑；RN 打包产物是「原生安装包」，里面塞了一个 JS bundle，给手机装。**相同点**：两者内部都有一个打包压缩后的 JS bundle。
+
+**React(Web) 打包产物**（`npm run build` → `dist/`）
+
+```
+dist/
+├── index.html              # 入口 HTML
+├── assets/
+│   ├── index-a1b2c3.js     # 打包压缩后的 JS bundle(带 hash)
+│   ├── vendor-d4e5f6.js     # 第三方库拆出的 chunk
+│   ├── index-x7y8z9.css     # 提取的 CSS
+│   └── logo-1234.png
+└── favicon.ico
+```
+
+面向浏览器，通过 URL 访问；可 code splitting 按路由拆多个 JS chunk 懒加载；部署 = 传服务器/CDN。
+
+**React Native 打包产物**（`eas build` → `.ipa`/`.aab`/`.apk`）
+
+```
+MyApp.apk(解压后)
+├── classes.dex                  # 编译后的原生代码
+├── lib/                          # 原生 .so 库(RN引擎、Hermes引擎等)
+├── assets/
+│   └── index.android.bundle      # ★ JS 代码打包成的 bundle
+├── res/                          # 原生资源(图标/启动图)
+└── AndroidManifest.xml
+```
+
+面向手机操作系统，要安装；部署 = 上架商店。
+
+**异同对比**
+
+| 维度 | React(Web) | React Native |
+|---|---|---|
+| 产物形态 | 静态文件目录 | 原生安装包 |
+| 入口 | index.html | 原生 App 启动→加载 JS bundle |
+| JS bundle | ✅ 有 | ✅ 有 |
+| CSS | ✅ 独立文件 | ❌ 无，样式编进 JS(StyleSheet) |
+| HTML | ✅ 有 | ❌ 无 |
+| 原生代码/引擎 | ❌ 无 | ✅ 有(.so/.dex + Hermes) |
+| 运行环境 | 浏览器 | 手机OS + RN 运行时 |
+| 交付方式 | 传服务器/CDN | 上架应用商店 |
+| 更新方式 | 传新文件即最新 | 商店发版；JS 部分可热更 |
+| 体积 | 小 | 大(含引擎) |
+| 拆包/懒加载 | ✅ 成熟 | 有限(单一 bundle 为主) |
+
+**最关键的相同点**：都有 JS bundle。Web 用 Vite/Webpack 打包，RN 用 **Metro**（RN 专属打包器），都做模块合并、压缩、Tree-shaking。**热更新的本质就是替换这个 JS bundle**——这正是为什么 RN 只有 JS 层能热更：原生部分(.so/.dex)换不了。
+
+**一句话**：相同是内部都有打包器生成的 JS bundle；不同是 React 产物是给浏览器的静态网页文件，RN 产物是给手机的原生安装包（原生引擎+JS bundle+原生资源），没有 HTML/CSS，体积大得多，更新要走商店（仅 JS bundle 可热更）。
+
+---
+
+## Q21：React Native 更新 JS bundle 有缓存问题需要处理吗？
+
+**结论**：Web 前端那套「浏览器缓存/CDN缓存/chunk hash/强缓存白屏」的痛点在 RN 基本不存在，热更新框架（EAS Update）自动管好了大部分缓存；但有几个「更新时机」和「一致性」问题需要手动处理。
+
+**对比 Web 痛点**
+
+| Web 前端缓存问题 | RN 有没有 |
+|---|---|
+| 浏览器强缓存旧 JS 导致白屏 | ❌ 没有(不经浏览器) |
+| 文件名要加 hash 防缓存 | ❌ 不用管(框架内部处理版本) |
+| CDN 缓存需刷新 | ❌ 没有 CDN 那层 |
+| chunk 懒加载失败 | ❌ 基本没有(单一 bundle) |
+
+原因：RN bundle 不是浏览器按 URL 请求的静态文件，而是**下载到设备本地存起来、由热更新框架管理版本**。
+
+**bundle 更新机制**
+
+```
+App 启动
+  ├─ 加载本地已缓存的 bundle(先跑起来,不卡启动)
+  ├─ 后台静默检查服务器有没有新 bundle → 有则下载到本地缓存(不影响当次运行)
+  └─ 下次启动 → 加载刚下载的新 bundle 生效
+```
+
+关键点：bundle 缓存在设备本地，框架自己管新旧版本；**默认「下次启动生效」**，这次运行还是旧的；框架做了原子切换+回滚，新 bundle 下载不完整/加载失败会自动回退。
+
+**真正需要处理的三件事**
+
+1. **更新生效时机**：默认下次冷启动才生效；想立即生效要手动调用：
+```js
+const update = await Updates.checkForUpdateAsync()
+if (update.isAvailable) {
+  await Updates.fetchUpdateAsync()
+  await Updates.reloadAsync()   // 立即重启生效
+}
+```
+2. **runtimeVersion 匹配**：JS bundle 依赖对应版本的原生代码，用错会崩溃（详见 Q22）。
+3. **多版本兼容**：灰度期不同用户 bundle 版本不同，后端要兼容多版本。
+
+远程图片等资源的缓存与 bundle 更新无关，走各自的图片缓存策略（如 expo-image）。
+
+**一句话**：RN 基本没有 Web 那种缓存导致白屏的痛点，bundle 由 EAS Update 自动管版本、原子切换、回滚；真正要处理的是更新生效时机、runtimeVersion 匹配、多版本兼容这三件事，不是"清缓存"。
+
+---
+
+## Q22：手动执行 fetchUpdateAsync + reloadAsync 后用户端表现如何？runtimeVersion 匹配如何规避崩溃？
+
+### reloadAsync 的用户端表现
+
+三个动作区分：`checkForUpdateAsync()` 只问有没有新版本；`fetchUpdateAsync()` 下载到本地（用户无感）；`reloadAsync()` **用新 bundle 重启 JS**（用户有明显感知）。
+
+`reloadAsync` **不退出整个 App 进程**，而是**重新加载 JS 层**：
+
+```
+调用 reloadAsync()
+   ↓
+当前界面消失 → 短暂闪一下(白屏/启动图) → App 从头重新加载 → 回到首页
+```
+
+用户感受：**画面闪一下、像重开了一次，停在首页（不是原来那个页面）**；会打断当前操作（表单/浏览位置丢失）；重载耗时几百毫秒到 1~2 秒；state 和导航栈全部重置。
+
+**不能无脑静默 reload**，正确做法：
+
+- **弹窗让用户决定**：
+```js
+await Updates.fetchUpdateAsync()
+Alert.alert('更新提示', '有新版本，是否立即重启应用？', [
+  { text: '稍后', style: 'cancel' },
+  { text: '立即更新', onPress: () => Updates.reloadAsync() },
+])
+```
+- **挑无感时机**：App 从后台切回前台时检查+reload；或干脆只下载不 reload，靠用户下次自然冷启动生效
+- **启动 splash 阶段更新**：启动图还没消失时 check+fetch+reload，用户只觉得启动稍久
+
+**一句话**：reloadAsync = JS 层热重启，画面闪一下回首页、丢失当前状态；要么弹窗让用户选，要么挑切前台/启动这类无感时机，不要在用户操作中途静默触发。
+
+### runtimeVersion 匹配的规避方法
+
+**核心原则**：JS bundle 和原生包必须版本对得上，改了原生就升 runtimeVersion，让 EAS Update 只把 bundle 推给 runtimeVersion 一致的 App。
+
+**做法一：policy 自动管理（推荐）**
+
+```jsonc
+// app.json
+{ "expo": { "runtimeVersion": { "policy": "fingerprint" } } }
+```
+
+| policy | 含义 | 适用 |
+|---|---|---|
+| appVersion | 跟随 App 版本号 | 简单 |
+| nativeVersion | 跟随原生版本号 | 类似 |
+| **fingerprint** | 自动扫描原生依赖生成指纹，原生一变指纹就变 | ⭐最精准推荐 |
+
+fingerprint 最省心：原生没变指纹不变，JS 可自由热更；一旦加原生库/改原生配置，指纹自动变化，老 App 拉不到新 bundle，自动防错配，不用手动判断"这次算不算动原生"。
+
+**做法二：手动管理**（固定字符串，靠人记，容易漏判，不推荐）
+
+**完整规避流程**
+
+```
+只改了 JS？ → runtimeVersion 不变 → eas update 热更新推送(老App安全拉到) ✅
+动了原生？ → runtimeVersion 变化(fingerprint自动变/手动升)
+           → 必须 eas build 重新打包走商店发版
+           → 老App(旧runtimeVersion)不会拉到新bundle，不会崩 ✅
+           → 用户装新原生包后runtimeVersion匹配，才开始接收对应bundle
+```
+
+**一句话**：用 `runtimeVersion: { policy: "fingerprint" }` 让工具自动追踪原生变化——原生没变时 JS 随便热更，原生一变指纹自动变、老 App 收不到新 bundle 只能走商店更新，新旧配对由 EAS Update 自动隔离，从根上杜绝"新 JS 配旧原生"的崩溃。
+
+---
+
+## Q23：checkUpdate 逻辑的执行时机是什么？是路由切换时吗？"新 JS 配旧原生"崩溃的详细流程是怎样的？
+
+### checkUpdate 执行时机——不是路由切换，是几个固定生命周期节点
+
+**核心原则**：检查更新是「App 级别」的动作，和路由切换（页面导航）无关——路由切换太频繁、太细，不适合挂检查更新逻辑。
+
+**常见挂载时机**
+
+1. **App 启动时**（最常用）：
+```jsx
+useEffect(() => { checkForUpdates() }, [])   // 只在 App 挂载时跑一次
+```
+
+2. **App 从后台切回前台时**：
+```jsx
+AppState.addEventListener('change', (nextState) => {
+  if (nextState === 'active') checkForUpdates()
+})
+```
+
+3. **定时轮询**（补充，不常作主力）：每 30 分钟等，用于长时间挂前台不退出的兜底。
+
+4. **Expo 自动检查配置**（不用手写）：
+```jsonc
+{ "expo": { "updates": { "checkAutomatically": "ON_LOAD" } } }
+```
+
+**为什么不挂路由切换**：一次 App 生命周期路由可能切几十次，检查更新是网络请求没必要这么频繁；更新检查关心的是"进程级别"该不该用新代码，不是"页面级别"的事；挂路由上会浪费流量电量且与体验无关。
+
+**一句话**：checkUpdate 挂在 App 启动 + 切前台 这两个生命周期节点，和路由切换无关。
+
+### "新 JS 配旧原生"崩溃的完整流程
+
+**场景**：做"人脸识别登录"，需要调用新原生模块 `expo-face-detector`（之前没装过）。
+
+**第一步——老用户手机现状**：用户 A 装的 App，原生层是上次发版时固定的二进制，**没有** `expo-face-detector` 的原生实现；JS 层调用的都是已有模块。原生二进制装进手机后不会再变，除非用户去商店重新下载新版本。
+
+**第二步——开发环境加新原生模块**：
+```bash
+npx expo install expo-face-detector
+npx expo prebuild   # 把新模块的原生代码编译进去
+```
+新构建的 App 原生层多了这个模块。
+
+**第三步——危险操作**：如果误把这次改动当纯 JS 热更新，直接 `eas update` 推给所有存量用户（包括原生层没有该模块的用户 A）：
+
+```
+用户A手机: 加载"新"JS bundle → 执行 expo-face-detector.detectFace()
+  → JS桥接层去原生找这个模块 → 原生层"没有,不存在" → 💥 崩溃/白屏
+```
+
+"新 JS" = 假设用户已有新原生能力的 JS 代码；"旧原生" = 用户手机里还停留在上次发版、没有新能力的原生二进制；JS 调用原生层根本不存在的东西 → 找不到对应原生方法 → 崩溃。
+
+**第四步——runtimeVersion 如何挡住这件事**：runtimeVersion 给"原生层的能力版本"打标签：
+
+```
+用户A的App: 原生层标签="abc123"(对应"没有人脸识别")
+新JS bundle: 要求的标签="xyz789"(对应"有人脸识别")
+热更新服务器: 只把标签"abc123"的bundle推给标签是"abc123"的用户
+  → 用户A标签"abc123" ≠ 新bundle标签"xyz789" → ❌不匹配
+  → 服务器根本不会把这个新bundle推给用户A
+  → 用户A继续用标签匹配的旧bundle(没有人脸识别，但能正常跑) ✅不崩溃
+```
+
+用 `fingerprint` 策略时，标签是自动计算的指纹：prebuild 前 fingerprint="abc123"，装了新模块后 prebuild 后自动变成"xyz789"，不用手动记。
+
+**第五步——用户 A 到底怎样才能用上新功能**：必须走商店更新，把新原生二进制装到手机上：
+```
+eas build(打包含新原生代码的新版本) → eas submit(上架审核) → 审核通过
+→ 用户A去商店更新 → 原生层真的有了expo-face-detector → 标签变成"xyz789"
+→ 服务器才把要求"xyz789"的JS bundle推给用户A → 正常工作 ✅
+```
+
+**一句话**：checkUpdate 挂在 App 启动和切前台，与路由无关；"新 JS 配旧原生"崩溃的本质是 JS 调用了用户手机原生层里根本不存在的东西（因为该用户还没通过商店更新获得这个新原生能力），而 runtimeVersion（尤其自动化的 fingerprint 策略）给"JS 需要的原生能力版本"和"用户手机实际拥有的版本"分别打标签，只有标签一致服务器才推送，从根源防止错配，把崩溃变成"静默跳过，留给下次真正发版触达"。
+
+---
+
+## Q24：是 runtimeVersion 匹配 bundle，还是 bundle 匹配 runtimeVersion？内部如何匹配？谁来做这个工作？
+
+**方向澄清**：严格说，runtimeVersion 不是"主动匹配"的一方，bundle 也不是——它们都只是**被贴上标签的对象**。真正执行"比对"这个动作的是**服务器**。
+
+更准确的说法：**客户端带着自己的 runtimeVersion 去问服务器，服务器拿这个值去"筛选出"标签相同的 bundle 返回**。即服务端根据 runtimeVersion 去匹配/筛选候选 bundle，而不是二者互相主动匹配。
+
+**标签来源 1——原生 App 内嵌的 runtimeVersion**
+
+```
+eas build 打包时
+  → 读取 app.json 的 runtimeVersion policy(如 fingerprint)
+  → 根据当前原生依赖/配置计算出具体值(如 "a1b2c3")
+  → 写死编译进这个原生包(iOS Info.plist/Expo.plist、Android对应资源)
+  → 此值固定不变,除非重新 build
+```
+
+**标签来源 2——每次发布的 JS bundle 也带 runtimeVersion 标签**
+
+```
+eas update 发布时
+  → CLI 用同样的 policy 重新计算一次 runtimeVersion
+  → 把算出的值作为标签,和这次 JS bundle 一起记录到服务端(manifest 里)
+```
+
+两边用**同一套计算规则**（如 fingerprint），原生没变则算出的值一样；原生变了则新旧包算出的值不同。
+
+**匹配的完整请求流程**
+
+```
+① App启动,expo-updates模块读取自己内嵌的runtimeVersion(如"a1b2c3")
+② 向EAS Update服务器发HTTP请求,带上:
+     expo-runtime-version: a1b2c3
+     expo-channel-name: production
+     expo-platform: ios/android
+③ 服务器收到请求:找到该channel下所有发布过的bundle
+     → 筛选出 runtimeVersion == "a1b2c3" 的
+     → 在筛选结果里挑最新发布的那一个
+④ 服务器把匹配上的bundle信息(manifest+下载地址)返回给客户端
+⑤ 客户端下载这个bundle
+⑥ 客户端下载后本地二次校验:下载回来的bundle标签是否与自己内嵌的一致
+     → 一致才允许应用(下次reload/启动生效)；不一致则拒绝,防止服务端配置出错误装
+```
+
+**谁执行了这项工作**
+
+| 步骤 | 谁执行 | 做什么 |
+|---|---|---|
+| 计算并贴标签(build时) | 本地/EAS 构建服务 | 给原生包算 runtimeVersion,写死进去 |
+| 计算并贴标签(publish时) | EAS CLI | 给这次 JS bundle 算 runtimeVersion,存到服务端 |
+| **真正的筛选/比对** | **EAS Update 服务器** | 拿客户端的 runtimeVersion,在候选 bundle 里找标签相同的 |
+| 二次校验(下载后) | 客户端本地(expo-updates模块) | 确认下载回来的 bundle 标签与自己一致,双重保险 |
+
+**一句话**：runtimeVersion 是贴在「原生 App」和「每次发布的 JS bundle」两边的同一种标签（用同一套规则算出）；"匹配"不是它俩自己做的，而是由 EAS Update 服务器在客户端请求更新时，拿客户端携带的 runtimeVersion 去候选 bundle 池里筛选出标签相同的那个返回，客户端下载后再本地二次核对一遍作为兜底。
