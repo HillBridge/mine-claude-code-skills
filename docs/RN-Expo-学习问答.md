@@ -273,3 +273,379 @@ rn-demo/
 ```
 
 **核心记忆**：`app/` 管页面路由、`components/`+`hooks/` 管复用、`app.json` 管应用配置；工程化配置大多一次配好很少动。
+
+---
+
+## Q10：默认 Expo 架构适合多人协作吗？有什么缺点？可以怎么优化？
+
+**结论**：起步够用，但**不适合多人协作的中大型项目**，需要改造。默认模板是官方为「演示 + 快速上手」设计的，扁平、按技术类型分目录，人一多、功能一多就暴露问题。
+
+**缺点**
+
+1. **按「技术类型」分目录而非「业务」分（最大问题）**：一个功能的代码散落在 `components/`、`hooks/`、`app/` 多处；目录会膨胀成大杂烩；多人改同一目录易 Git 冲突；难以整块删除/迁移。
+2. **缺少明确分层**：没有 `api/`、`services/`、`store/`，网络请求和业务逻辑容易塞进组件，导致组件臃肿、逻辑难复用。
+3. **没有工程化协作约束**：缺 `eas.json`、`.env.*`、统一的 Prettier/commit 规范/CI；路径别名只有 `@/*` 粒度太粗。
+4. **示例代码混在里面**：parallax、explore、modal 等演示代码干扰真实开发。
+5. **测试目录缺失**：没有 `__tests__/` 约定。
+
+**优化：改造成 Feature-Sliced（按业务分层）结构**
+
+```
+rn-demo/
+├── app/                        # 只放路由页面（页面只做组装，不写业务逻辑）
+├── src/
+│   ├── features/               # 【核心】按业务模块分，每块自成一体
+│   │   └── order/              #   订单功能
+│   │       ├── components/     #     专属组件
+│   │       ├── hooks/          #     专属 hook
+│   │       ├── api/            #     专属接口
+│   │       ├── constants/
+│   │       ├── types.ts
+│   │       └── __tests__/      #     该功能测试
+│   ├── shared/                 # 跨功能共享（通用组件/hooks/utils/constants）
+│   ├── api/                    # 基础设施（请求实例、拦截器、通用接口）
+│   ├── services/               # 业务服务层
+│   ├── store/                  # 全局状态（Zustand/Redux）
+│   └── theme/                  # 主题、颜色、字体
+├── assets/
+├── app.config.js               # 替代 app.json，多环境动态配置
+├── eas.json                    # staging / production 构建 profile
+├── .env.staging / .env.production
+├── .prettierrc / commitlint    # 团队代码/提交规范
+└── tsconfig.json               # 更细的路径别名
+```
+
+**配套改造清单**
+
+| 优化项 | 做法 | 解决什么 |
+|---|---|---|
+| 业务分层 | 引入 `src/features/*` | 功能内聚，减少 Git 冲突 |
+| 共享层 | `src/shared/` | 复用清晰，避免重复 |
+| 接口分层 | `src/api/` + feature 内 `api/` | 请求逻辑独立于 UI |
+| 状态管理 | 加 `src/store/`（Zustand 轻量） | 全局状态统一去处 |
+| 多环境 | `eas.json` + `app.config.js` + `.env.*` | 测试/生产隔离 |
+| 路径别名 | tsconfig 配 `@/features` `@/shared` 等 | import 清爽 |
+| 规范 | Prettier + ESLint + commitlint + CI | 多人风格统一 |
+| 清理示例 | `npm run reset-project` | 去演示代码干扰 |
+| 测试约定 | 每个 feature 内建 `__tests__/` | 测试有落脚点 |
+
+**一句话**：默认结构「demo 友好、团队不友好」；多人协作要改成 Feature-Sliced（按业务分层）+ shared 共享层 + 清晰的 api/store 分层 + 多环境配置 + 团队规范。
+
+---
+
+## Q11：原生功能在哪里？如何调用原生功能？
+
+核心：**大部分原生能力不用碰原生代码，直接 import JS 包调用**。原生功能分四个层级，从省事到硬核：
+
+```
+省事 ←──────────────────────────────────────→ 硬核
+① Expo SDK      ② 第三方原生库    ③ Config Plugin    ④ 自写原生模块
+（装了就用）    （社区封装好）     （改原生配置）      （写 Swift/Kotlin）
+```
+
+**① Expo SDK —— 官方封装好的原生能力（最常用，覆盖约 90% 需求）**
+
+npm 包形式，装完直接 import，不碰原生代码。
+
+```bash
+npx expo install expo-camera expo-location
+```
+
+```js
+import * as Location from 'expo-location'
+const { status } = await Location.requestForegroundPermissionsAsync()
+const loc = await Location.getCurrentPositionAsync()
+```
+
+**② 第三方原生库 —— 社区封装的原生能力**
+
+Expo SDK 没覆盖的用社区库；含原生代码，**不能在 Expo Go 跑**，需 Dev Client。
+
+```bash
+npx expo install react-native-xxx
+npx expo prebuild
+eas build --profile development
+```
+
+**③ Config Plugin —— 通过配置修改原生工程**
+
+需要改 `Info.plist`/`AndroidManifest.xml`/加权限时，写进 `app.config.js` 的 `plugins`，prebuild 时自动应用，仍不用手写原生。
+
+```js
+plugins: [
+  'expo-camera',
+  ['expo-location', { locationAlwaysAndWhenInUsePermission: '需要定位…' }],
+]
+```
+
+**④ 自写原生模块 —— 真正的原生代码（最少用到）**
+
+以上都满足不了才写，推荐用 Expo Modules API（比传统 Bridge 简单）。位置在 `modules/`（本地模块）或 `ios/`+`android/`。
+
+```bash
+npx create-expo-module my-native-module --local
+```
+
+**位置与能否在 Expo Go 运行**
+
+| 层级 | 物理位置 | 你写什么 | Expo Go 能跑 |
+|---|---|---|---|
+| ① Expo SDK | node_modules（import） | 只写 JS | ✅ |
+| ② 第三方原生库 | node_modules + prebuild | 只写 JS | ❌ 需 Dev Client |
+| ③ Config Plugin | app.config.js 的 plugins | 写配置 | ❌ 需 Dev Client |
+| ④ 自写原生模块 | modules/ 或 ios/+android/ | Swift/Kotlin + JS | ❌ 需 Dev Client |
+
+**权限处理**：调用原生能力几乎都要「运行时请求 + 声明用途」。
+
+```js
+const { status } = await Camera.requestCameraPermissionsAsync()   // 运行时请求
+```
+```js
+ios: { infoPlist: { NSCameraUsageDescription: '需要相机以拍摄凭证' } }  // 声明用途，iOS 必写
+```
+
+**实用建议**：从上往下选，能用高层就别下沉——先查 Expo SDK → 社区原生库 → config plugin → 最后才自写原生。新手和多数产品停在 ①②③ 层就够，几乎不用写 Swift/Kotlin。
+
+---
+
+## Q12：React Native 写的代码和 React 代码有什么区别和相似点？
+
+**共享同一套语言和思想内核，区别主要在「渲染成什么」和「用什么标签/样式」。会 React 学 RN 很快（1~2 天）。**
+
+**相似点（几乎照搬）**
+
+- 同一套 React 核心：组件、JSX、props、state、Hooks（useState/useEffect/useContext…）、单向数据流
+- 状态管理库通用：Zustand、Redux、React Query
+- 非 UI 库直接复用：axios、dayjs、lodash、zod、i18n
+- TypeScript / ESLint / Prettier / 函数式组件写法一致
+
+**区别（需要重新学）**
+
+1. **渲染目标不同**：Web 渲染成 DOM 跑在浏览器；RN 渲染成原生组件跑在 App 里，**没有 DOM**。
+
+2. **标签不同（没有 div/span）**：
+
+| React(Web) | React Native | 说明 |
+|---|---|---|
+| `<div>` | `<View>` | 容器 |
+| `<span>`/`<p>` | `<Text>` | 所有文字必须包在 Text 里 |
+| `<img>` | `<Image>` | 图片 |
+| `<input>` | `<TextInput>` | 输入框 |
+| `<button>` | `<Pressable>`/`<TouchableOpacity>` | 按钮 |
+| 自动滚动 | `<ScrollView>`/`<FlatList>` | 滚动要显式组件 |
+| `<a>` | 路由 `<Link>` | 无超链接概念 |
+
+3. **样式不同（没有 CSS）**：用 `StyleSheet.create` + JS 对象；无单位数字；默认全是 Flexbox 且默认竖向（column）；属性驼峰命名；**无级联、无继承**。
+
+```js
+const styles = StyleSheet.create({
+  box: { flex: 1, backgroundColor: '#fff', padding: 16 },  // 驼峰、无单位
+})
+```
+
+4. **事件不同**：`onClick`→`onPress`；`onChange`→`onChangeText`；无 hover；要处理软键盘遮挡（KeyboardAvoidingView）。
+
+5. **平台与 API 差异**：没有 window/document；存储用 `AsyncStorage` 而非 localStorage；路由用 React Navigation/Expo Router；区分平台用 `Platform.OS` 或 `Xxx.ios.js`/`Xxx.android.js`。
+
+6. **布局细节**：默认 Flexbox 且竖向排列；没有 grid/float/fixed（有 absolute）；长列表必须用 `FlatList`（虚拟化），不能直接 map 一堆元素。
+
+**关系图**
+
+```
+        共享内核（几乎照搬）
+   ┌─────────────────────────────┐
+   │ React 组件 / JSX / Hooks     │
+   │ 状态管理 / TS / 业务逻辑库    │
+   └─────────────────────────────┘
+              │
+      ┌───────┴────────┐
+      ▼                ▼
+  React (Web)     React Native
+  ├ div/span/img   ├ View/Text/Image
+  ├ CSS 样式       ├ StyleSheet(JS对象)
+  ├ onClick        ├ onPress
+  ├ DOM / 浏览器   ├ 原生组件 / App
+  └ 路由=URL       └ 路由=Navigation
+```
+
+**一句话**：逻辑层完全一样，视图层需要重学。React 教你「怎么思考组件和状态」100% 复用；RN 只是把渲染标签 + 样式 + 事件名 + 平台 API 换成移动端的一套。
+
+---
+
+## Q13：Expo SDK 官方原生能力对 iOS 和 Android 的兼容性做得怎么样？
+
+**结论**：跨平台兼容性做得**相当扎实**，是 Expo 的核心价值——同一份 JS 代码两端大多直接跑、行为一致。少数差异来自操作系统本身，抹不平。
+
+**兼容性好的部分**（写一套 JS 两端通用）
+
+| 能力 | iOS | Android | 一致性 |
+|---|---|---|---|
+| 相机 / 定位 / 文件系统 | ✅ | ✅ | 高 |
+| 图片选择 / AsyncStorage | ✅ | ✅ | 高 |
+| 安全存储 secure-store | ✅ Keychain | ✅ Keystore | 高（底层不同 API 一致） |
+| 生物识别 | ✅ FaceID/TouchID | ✅ 指纹/人脸 | 高 |
+| 传感器 / 设备信息 / 网络 | ✅ | ✅ | 高 |
+| 通知 | ✅ | ✅ | 中高 |
+
+**需注意平台差异的部分**（系统层面差异，谁都抹不平）
+
+1. **权限模型**：iOS 用途写 `Info.plist`（漏写拒审），Android 写 `AndroidManifest.xml`，Android 13+ 通知/精确定位有新规则。
+2. **推送差异大**：iOS 走 APNs（须真机测、配证书），Android 走 FCM（配 `google-services.json`），前后台展示行为不一致。
+3. **后台任务/定位**：iOS 省电策略严格，后台能力弱于 Android。
+4. **系统 UI**：返回手势（iOS 侧滑 vs Android 物理键）、安全区（刘海/灵动岛，用 `react-native-safe-area-context`）、系统组件外观不同。
+5. **少数模块单端支持**：Expo 文档每个 API 页顶部有平台支持标记（iOS/Android/Web），用前先看。
+
+**应对平台差异**
+
+```js
+import { Platform } from 'react-native'
+const padding = Platform.OS === 'ios' ? 20 : 16
+const shadow = Platform.select({
+  ios: { shadowColor: '#000', shadowOpacity: 0.1 },
+  android: { elevation: 4 },
+})
+// 或分平台文件：Button.ios.tsx / Button.android.tsx → import './Button'
+```
+
+**对比第三方原生库**：官方 SDK 两端都测、有保障；第三方库兼容性参差不齐（可能只支持一端或某端有坑），选库要核实 star、更新频率、issue 里两端反馈。
+
+**一句话**：官方 Expo SDK 的 iOS/Android 兼容性很扎实，常见能力一套 JS 两端通用；剩下差异主要来自操作系统本身（权限/推送/后台/系统 UI），用 `Platform` API 或分平台文件处理即可。
+
+---
+
+## Q14：React Native 写的代码都是原生的吗？与 React JS 通过 WebView 内嵌有什么区别？
+
+**RN 是原生的吗？——一半是：原生渲染 + JS 逻辑**
+
+- **UI 层是真原生**：`<View>`/`<Text>` 最终渲染成 iOS 的 `UIView`、Android 的 `android.view` 等真正的原生控件，不是网页元素。
+- **逻辑层是 JS**：业务代码跑在 JS 引擎（Hermes）里，通过桥接（旧 Bridge / 新架构 JSI）和原生通信。
+- 准确说法：**原生渲染 + JS 逻辑**，不是 100% 原生（那是直接写 Swift/Kotlin），也不是网页。
+
+```
+纯原生(Swift/Kotlin)   React Native        WebView 混合(Cordova/Ionic)
+   全原生 UI+逻辑      原生 UI + JS 逻辑      网页 UI + JS 逻辑（套壳）
+   ←──────────────── 越来越不"原生" ────────────────→
+```
+
+**RN vs WebView 内嵌 全面对比**
+
+对象：RN（JS 逻辑 + 原生渲染） vs WebView 混合（把网页塞进 App 的 WebView 里显示，代表 Cordova/Ionic/Capacitor/内嵌 H5）。
+
+| 维度 | React Native | WebView 内嵌 |
+|---|---|---|
+| **UI 渲染** | 原生控件 | 浏览器内核渲染 HTML/CSS |
+| **本质** | JS 指挥原生画界面 | App 里开个浏览器显示网页 |
+| **渲染性能** | 接近原生 | 受 WebView 限制，复杂页面卡 |
+| **滚动/动画** | 流畅（FlatList/原生动画） | 长列表、复杂动画易掉帧 |
+| **启动速度** | 较快 | WebView 初始化+网页加载，偏慢 |
+| **交互手感** | 原生级 | 有「网页感」 |
+| **原生能力** | 直接调用，上限高 | 经 Bridge 转发，受容器限制 |
+| **技术栈** | React + RN 组件（需学差异） | 普通 Web（零迁移） |
+| **Web 复用** | 逻辑复用，UI 重写 | 网页几乎原样复用 |
+| **热更新** | 支持但受苹果政策约束 | 天然支持（改服务器网页即可） |
+| **包体积** | 中 | 小（壳）或中 |
+| **离线** | 好（代码打包本地） | 纯在线 H5 离线差 |
+
+**怎么选**
+
+- **RN**：要原生体验/性能、手势动画长列表多、硬件调用多、正式产品级 App。
+- **WebView 混合**：已有成熟 Web 想快速套壳、内容型/营销页（变化频繁要随时更新）、团队只有 Web 能力、局部嵌 H5。
+
+**三者关系**
+
+```
+                 UI 渲染         逻辑        体验    原生能力   更新灵活度
+纯原生           原生控件        原生        ★★★★★   ★★★★★     低（必发版）
+React Native     原生控件        JS(Hermes)  ★★★★☆   ★★★★☆     中（有限热更）
+WebView 混合     浏览器渲染网页   JS          ★★☆☆☆   ★★☆☆☆     高（改网页即可）
+```
+
+**一句话**：RN 不是纯原生，但 UI 是真原生渲染、逻辑用 JS，性能体验远好于 WebView 套壳，同时保留 JS 效率；WebView 内嵌本质是「App 里开浏览器显示网页」，胜在 Web 复用和更新灵活，输在性能、原生感和能力上限。
+
+---
+
+## Q15：可以 RN + WebView 结合开发吗？如何区分场景？好处和坏处？
+
+**可以，而且是业界主流做法**。RN 提供 `react-native-webview` 组件，很多大厂 App 都是「RN/原生外壳 + 局部 H5」。
+
+**怎么结合**
+
+```jsx
+import { WebView } from 'react-native-webview'
+<WebView source={{ uri: 'https://h5.myapp.com/activity/618' }} style={{ flex: 1 }} />
+```
+
+架构：RN 负责骨架和核心页面，WebView 承载某些页面/区块。
+
+```
+┌─────────────────────────────────┐
+│   App 外壳（React Native）        │
+│   ├ Tab 导航 / 路由（RN）         │
+│   ├ 首页、个人中心（RN 原生渲染）  │
+│   ├ 支付、扫码（RN + 原生模块）    │
+│   └ [ WebView: 营销活动/文章/帮助中心（H5） ] │
+└─────────────────────────────────┘
+```
+
+**如何划分场景**——判断标准：「变化频率」和「体验要求」哪个更高。
+
+- **用 RN（原生渲染）**：首页/Tab 主框架、列表 Feed 流、登录/支付/扫码、相机/地图/复杂交互、个人中心。特征：高频交互、要原生体验、要调硬件、稳定不常改。
+- **用 WebView（H5）**：营销活动页/大促会场、文章资讯/帮助中心、用户协议/隐私政策、运营配置/问卷、已有成熟 Web 业务。特征：内容型、变化快、要随时更新、体验要求不高、可复用现有网页。
+
+> 划分原则：**核心和高频交互用 RN；边缘的、内容型的、变化快的用 H5。**「用户天天用的」用原生，「运营天天改的」用 H5。
+
+**好处**
+
+| 方面 | 好处 |
+|---|---|
+| 更新灵活 | H5 改服务器即可，活动页秒级上线不用审核 |
+| 体验保底 | 核心页面 RN 保证门面和高频操作原生手感 |
+| 开发效率 | 活动页交给 Web 团队快速产出 |
+| 复用资产 | 已有 Web 业务直接嵌入不重写 |
+| 分工清晰 | 原生/RN 团队 + H5 团队并行 |
+| 降低发版压力 | 大量易变内容走 H5 |
+
+**坏处 / 代价**
+
+| 方面 | 问题 |
+|---|---|
+| 体验割裂 | H5 与 RN 手感不一致，用户能感知 |
+| 通信复杂 | RN↔WebView 双向通信要搭 Bridge |
+| 性能落差 | H5 加载慢、复杂交互卡，低端机/弱网明显 |
+| 调试困难 | 出问题要判断 RN 层还是 H5 层 |
+| 登录态同步 | token/用户信息要在两层间传递，易出 bug |
+| 离线白屏 | 纯在线 H5 弱网白屏，需离线包兜底 |
+| 审核风险 | H5 占比过高可能被判「不像原生 App」拒审 |
+| 安全 | WebView 有 XSS/任意 URL 风险，要域名白名单 |
+
+**RN ↔ WebView 通信（结合的核心难点）**
+
+```jsx
+// RN → H5：注入 JS / 传登录态；接收 H5 消息
+<WebView
+  source={{ uri: url }}
+  injectedJavaScript={`window.APP_TOKEN='${token}';true;`}
+  onMessage={(e) => {
+    const data = JSON.parse(e.nativeEvent.data)
+    if (data.type === 'pay') startNativePay(data.order)   // H5 请求调起原生支付
+  }}
+/>
+```
+```js
+// H5 → RN：调用原生能力
+window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'pay', order: '123' }))
+```
+
+典型模式：H5 负责展示，需要原生能力（支付/扫码/分享）时通过 Bridge 通知 RN 执行。
+
+**落地建议**：① 先分层（页面标注高频核心 vs 易变内容）；② 统一 Bridge 通信协议；③ 设计好登录态注入与过期同步；④ 重要 H5 做离线包兜底；⑤ 控制 H5 占比避免拒审、守住体验；⑥ WebView 加域名白名单。
+
+**三种形态对比**
+
+| 形态 | 描述 | 适合 |
+|---|---|---|
+| 纯 RN | 全部原生渲染 | 追求极致体验、交互复杂 |
+| 纯 WebView 套壳 | 整个 App 就是网页 | 极简、纯展示、预算紧 |
+| **RN + WebView 混合** | 核心 RN + 边缘 H5 | **绝大多数中大型 App 的现实选择** |
+
+**一句话**：能结合且是主流最优解——RN 做核心骨架和高频/硬件页面保体验，WebView 承载易变/内容型/可复用页面换灵活和效率；代价是体验割裂、通信复杂、调试和登录态同步成本。关键是按「高频核心 vs 易变内容」清晰分层、统一 Bridge 规范、控制 H5 占比守住体验和审核底线。
